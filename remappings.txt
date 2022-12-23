@@ -1,0 +1,7 @@
+ERC721A/=lib/ERC721A/contracts/
+create2-clones-with-immutable-args/=lib/create2-clones-with-immutable-args/src/
+ds-test/=lib/forge-std/lib/ds-test/src/
+forge-std/=lib/forge-std/src/
+solady/=lib/solady/src/
+solmate/=lib/solmate/src/
+openzeppelin-contracts/=lib/openzeppelin-contracts/
