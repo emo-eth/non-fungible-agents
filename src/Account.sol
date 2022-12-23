@@ -3,6 +3,7 @@ pragma solidity ^0.8.17;
 
 import {Clone} from "create2-clones-with-immutable-args/Clone.sol";
 import {IERC721} from "forge-std/interfaces/IERC721.sol";
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Executable} from "./Executable.sol";
 import {TokenOwnable} from "./TokenOwnable.sol";
 import {Context} from "openzeppelin-contracts/contracts/utils/Context.sol";
@@ -82,6 +83,42 @@ contract Account is Clone, Executable, TokenOwnable {
         return super.executeBundleOptimized(bundles);
     }
 
+    function setApprovalForAll(address tokenAddress, address approvedAddress, bool approved) public returns (bool) {
+        _onlyOwner();
+        _notFrozen();
+        _updateApprovedOperator(
+            _approvedForAll, _approvalsForAll[tokenAddress], tokenAddress, approvedAddress, approved ? 1 : 0
+        );
+        IERC721(tokenAddress).setApprovalForAll(approvedAddress, approved);
+    }
+
+    function approveErc721(address tokenAddress, address approvedAddress, uint256 tokenId) public {
+        _onlyOwner();
+        _notFrozen();
+        _updateApprovedOperator(
+            _approvedErc20s, _erc20ApprovalsMap[tokenAddress], tokenAddress, approvedAddress, tokenId
+        );
+        // ensure it's an ERC721, since selector is same as ERC20
+        require(IERC721(tokenAddress).ownerOf(tokenId) == address(this), "Account: not owner of token");
+        IERC721(tokenAddress).approve(approvedAddress, tokenId);
+    }
+
+    function approveErc20(address tokenAddress, address approvedAddress, uint256 amount) public {
+        _onlyOwner();
+        _notFrozen();
+        _updateApprovedOperator(
+            _approvedErc20s, _erc20ApprovalsMap[tokenAddress], tokenAddress, approvedAddress, amount
+        );
+
+        IERC20(tokenAddress).approve(approvedAddress, amount);
+        // ensure it's an ERC20, since selector is same as ERC721
+        try IERC20(tokenAddress).allowance(address(this), approvedAddress) returns (uint256) {
+            // do nothing
+        } catch {
+            revert("Not ERC20");
+        }
+    }
+
     function _notFrozen() internal view {
         if (isFrozen) {
             revert AccountFrozen();
@@ -103,12 +140,10 @@ contract Account is Clone, Executable, TokenOwnable {
     function _trackApprovals(ApprovalType approvalType, address target, address approvedAddress, uint256 approvedValue)
         internal
     {
-        // TrackedApproval trackedApproval = createTrackedApproval(selector, target);
-
         if (approvalType == ApprovalType.ERC20_APPROVE) {
-            updateApprovedOperator(_approvedErc20s, _erc20ApprovalsMap[target], target, approvedAddress, approvedValue);
+            _updateApprovedOperator(_approvedErc20s, _erc20ApprovalsMap[target], target, approvedAddress, approvedValue);
         } else if (approvalType == ApprovalType.SET_APPROVAL_FOR_ALL) {
-            updateApprovedOperator(_approvedForAll, _approvalsForAll[target], target, approvedAddress, approvedValue);
+            _updateApprovedOperator(_approvedForAll, _approvalsForAll[target], target, approvedAddress, approvedValue);
         } else if (approvalType == ApprovalType.ERC721_APPROVE) {
             if (approvedAddress == address(0)) {
                 bool removed = _erc721ApprovalsMap[target].remove(approvedValue);
@@ -120,19 +155,27 @@ contract Account is Clone, Executable, TokenOwnable {
                 _erc721ApprovalsMap[target].set(approvedValue, approvedAddress);
             }
         } else {
-            // increase allowance
-            uint256 currentValue = _erc20ApprovalsMap[target].get(approvedAddress);
-            uint256 newValue = currentValue + approvedValue;
-            updateApprovedOperator(_approvedErc20s, _erc20ApprovalsMap[target], target, approvedAddress, newValue);
+            if (approvedValue > 0) {
+                // increase allowance
+                uint256 currentValue;
+                if (_erc20ApprovalsMap[target].contains(approvedAddress)) {
+                    currentValue = _erc20ApprovalsMap[target].get(approvedAddress);
+                } else {
+                    currentValue = 0;
+                }
+                uint256 newValue = currentValue + approvedValue;
+                _updateApprovedOperator(_approvedErc20s, _erc20ApprovalsMap[target], target, approvedAddress, newValue);
+            }
         }
+        // TODO: track decreases
     }
 
-    function _clearTokenApprovals() internal {
+    function _clearAllTokenApprovals() internal {
         uint256 length = _approvedErc20s.length();
         unchecked {
             for (uint256 i = 0; i < length; ++i) {
                 address tokenAddress = _approvedErc20s.at(0);
-                _clearTokenApproval(TokenType.ERC20, ApprovalType.ERC20_APPROVE, tokenAddress);
+                _clearErc20Approvals(tokenAddress);
                 _approvedErc20s.remove(tokenAddress);
             }
         }
@@ -140,7 +183,7 @@ contract Account is Clone, Executable, TokenOwnable {
         unchecked {
             for (uint256 i = 0; i < length; ++i) {
                 address tokenAddress = _approvedErc721s.at(0);
-                _clearTokenApproval(TokenType.ERC721, ApprovalType.ERC721_APPROVE, tokenAddress);
+                _clearErc721Approvals(tokenAddress);
                 _approvedErc721s.remove(tokenAddress);
             }
         }
@@ -148,15 +191,50 @@ contract Account is Clone, Executable, TokenOwnable {
         unchecked {
             for (uint256 i = 0; i < length; ++i) {
                 address tokenAddress = _approvedForAll.at(0);
-                _clearTokenApproval(TokenType.ERC1155, ApprovalType.SET_APPROVAL_FOR_ALL, tokenAddress);
+                _clearApprovalsForAll(tokenAddress);
                 _approvedForAll.remove(tokenAddress);
             }
         }
     }
 
-    function _clearTokenApproval(TokenType tokenType, ApprovalType approvalType, address tokenAddress) internal {}
+    function _clearErc20Approvals(address tokenAddress) internal {
+        uint256 erc20ApprovalsLength = _erc20ApprovalsMap[tokenAddress].length();
+        unchecked {
+            for (uint256 i = 0; i < erc20ApprovalsLength; ++i) {
+                (address operator,) = _erc20ApprovalsMap[tokenAddress].at(0);
 
-    function updateApprovedOperator(
+                IERC20(tokenAddress).approve(operator, 0);
+                _erc20ApprovalsMap[tokenAddress].remove(operator);
+                // todo: try decrease?
+            }
+        }
+        // todo: probably unsafe
+        // _erc20ApprovalsMap[tokenAddress].clear();
+    }
+
+    function _clearApprovalsForAll(address tokenAddress) internal {
+        uint256 approvalsForAllLength = _approvalsForAll[tokenAddress].length();
+        unchecked {
+            for (uint256 i = 0; i < approvalsForAllLength; ++i) {
+                (address operator,) = _approvalsForAll[tokenAddress].at(0);
+                IERC721(tokenAddress).setApprovalForAll(operator, false);
+                _approvalsForAll[tokenAddress].remove(operator);
+            }
+        }
+    }
+
+    function _clearErc721Approvals(address tokenAddress) internal {
+        uint256 erc721ApprovalsLength = _erc721ApprovalsMap[tokenAddress].length();
+        unchecked {
+            for (uint256 i = 0; i < erc721ApprovalsLength; ++i) {
+                (uint256 tokenId,) = _erc721ApprovalsMap[tokenAddress].at(0);
+                IERC721(tokenAddress).approve(address(0), tokenId);
+                _erc721ApprovalsMap[tokenAddress].remove(tokenId);
+            }
+        }
+    }
+
+    function _updateApprovedOperator(
         EnumerableSet.AddressSet storage toUpdate,
         EnumerableMap.AddressToUintMap storage toAddOrRemove,
         address target,
