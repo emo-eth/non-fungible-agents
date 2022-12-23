@@ -6,9 +6,9 @@ import {IERC721} from "forge-std/interfaces/IERC721.sol";
 import {Executable} from "./Executable.sol";
 import {TokenOwnable} from "./TokenOwnable.sol";
 import {Context} from "openzeppelin-contracts/contracts/utils/Context.sol";
-import {AccountFrozen} from "./lib/Errors.sol";
+import {AccountFrozen, UseApprovalSpecificMethods} from "./lib/Errors.sol";
 // import {ERC20_APPROVAL_SELECTOR} from "./lib/Constants.sol";
-import {ApprovalType} from "./lib/Enums.sol";
+import {TokenType, ApprovalType} from "./lib/Enums.sol";
 import {EnumerableMap, EnumerableSet} from "openzeppelin-contracts/contracts/utils/structs/EnumerableMap.sol";
 import {
     IERC20_721_APPROVE_SELECTOR,
@@ -17,23 +17,69 @@ import {
     SELECTOR_MASK
 } from "./lib/Constants.sol";
 import {TrackedApproval, createTrackedApproval} from "./lib/types/TrackedApproval.sol";
+import {Bundle} from "./lib/Structs.sol";
 
 contract Account is Clone, Executable, TokenOwnable {
     // using EnumerableMap for EnumerableMap.UintToUintMap;
     using EnumerableSet for EnumerableSet.UintSet;
     using EnumerableSet for EnumerableSet.AddressSet;
+    using EnumerableMap for EnumerableMap.AddressToUintMap;
+    using EnumerableMap for EnumerableMap.UintToAddressMap;
 
     bool public isFrozen;
-    // track each type of approval for each token
-    EnumerableSet.UintSet _trackedApprovals;
-    // track which addresses were approved for each approval type
-    mapping(uint256 => EnumerableSet.AddressSet) _trackedApprovalsToAddresses;
-    // track the values of each approval for each address
-    mapping(uint256 => mapping(address => EnumerableSet.UintSet)) _trackedApprovalTypesToAddressesToValues;
+
+    EnumerableSet.AddressSet _approvedErc20s;
+    EnumerableSet.AddressSet _approvedErc721s;
+    EnumerableSet.AddressSet _approvedForAll;
+
+    mapping(address => EnumerableMap.AddressToUintMap) _approvalsForAll;
+    mapping(address => EnumerableMap.AddressToUintMap) _erc20ApprovalsMap;
+    mapping(address => EnumerableMap.UintToAddressMap) _erc721ApprovalsMap;
 
     function freeze() public {
         _onlyOwner();
         isFrozen = true;
+    }
+
+    function execute(address target, uint256 value, bytes calldata callData)
+        public
+        payable
+        override
+        returns (bytes memory)
+    {
+        _onlyOwner();
+        _notFrozen();
+        _notApproval(callData);
+        return super.execute(target, value, callData);
+    }
+
+    function executeBundle(Bundle[] calldata bundles) public payable override returns (bytes[] memory) {
+        _onlyOwner();
+        _notFrozen();
+        unchecked {
+            for (uint256 i = 0; i < bundles.length; ++i) {
+                _notApproval(bundles[i].data);
+            }
+        }
+        return super.executeBundle(bundles);
+    }
+
+    function executeOptimized(address target, uint256 value, bytes calldata callData) public payable override {
+        _onlyOwner();
+        _notFrozen();
+        _notApproval(callData);
+        return super.executeOptimized(target, value, callData);
+    }
+
+    function executeBundleOptimized(Bundle[] calldata bundles) public payable override {
+        _onlyOwner();
+        _notFrozen();
+        unchecked {
+            for (uint256 i = 0; i < bundles.length; ++i) {
+                _notApproval(bundles[i].data);
+            }
+        }
+        return super.executeBundleOptimized(bundles);
     }
 
     function _notFrozen() internal view {
@@ -42,25 +88,111 @@ contract Account is Clone, Executable, TokenOwnable {
         }
     }
 
-    function _trackApprovals(address target, bytes calldata callData) internal {
-        uint256 selector = _getSelector(callData);
-        address approvedAddress = _getApprovedAddressFromApproveCalldata(callData);
-        uint256 approvedValue = _getApprovedValueFromApproveCalldata(callData);
-        TrackedApproval trackedApproval = createTrackedApproval(selector, target);
-        _trackedApprovalTypes
-    }
-
-    function _getApprovedAddressFromApproveCalldata(bytes calldata callData) internal returns (address) {
-        ///@solidity memory-safe-assembly
-        assembly {
-            let addr := calldataload(add(callData.offset, 0x24))
+    function _notApproval(bytes calldata callData) internal pure {
+        if (_isApproval(callData)) {
+            revert UseApprovalSpecificMethods();
         }
     }
 
-    function _getApprovedValueFromApproveCalldata(bytes calldata callData) internal returns (uint256) {
+    function _isApproval(bytes calldata callData) internal pure returns (bool) {
+        uint256 selector = _getSelector(callData);
+        return selector == IERC20_721_APPROVE_SELECTOR || selector == IERC20_NONSTANDARD_INCREASE_ALLOWANCE_SELECTOR
+            || selector == IERC721_1155_SET_APPROVAL_FOR_ALL_SELECTOR;
+    }
+
+    function _trackApprovals(ApprovalType approvalType, address target, address approvedAddress, uint256 approvedValue)
+        internal
+    {
+        // TrackedApproval trackedApproval = createTrackedApproval(selector, target);
+
+        if (approvalType == ApprovalType.ERC20_APPROVE) {
+            updateApprovedOperator(_approvedErc20s, _erc20ApprovalsMap[target], target, approvedAddress, approvedValue);
+        } else if (approvalType == ApprovalType.SET_APPROVAL_FOR_ALL) {
+            updateApprovedOperator(_approvedForAll, _approvalsForAll[target], target, approvedAddress, approvedValue);
+        } else if (approvalType == ApprovalType.ERC721_APPROVE) {
+            if (approvedAddress == address(0)) {
+                bool removed = _erc721ApprovalsMap[target].remove(approvedValue);
+                if (removed && _erc721ApprovalsMap[target].length() == 0) {
+                    _approvedErc721s.remove(target);
+                }
+            } else {
+                _approvedErc721s.add(target);
+                _erc721ApprovalsMap[target].set(approvedValue, approvedAddress);
+            }
+        } else {
+            // increase allowance
+            uint256 currentValue = _erc20ApprovalsMap[target].get(approvedAddress);
+            uint256 newValue = currentValue + approvedValue;
+            updateApprovedOperator(_approvedErc20s, _erc20ApprovalsMap[target], target, approvedAddress, newValue);
+        }
+    }
+
+    function _clearTokenApprovals() internal {
+        uint256 length = _approvedErc20s.length();
+        unchecked {
+            for (uint256 i = 0; i < length; ++i) {
+                address tokenAddress = _approvedErc20s.at(0);
+                _clearTokenApproval(TokenType.ERC20, ApprovalType.ERC20_APPROVE, tokenAddress);
+                _approvedErc20s.remove(tokenAddress);
+            }
+        }
+        length = _approvedErc721s.length();
+        unchecked {
+            for (uint256 i = 0; i < length; ++i) {
+                address tokenAddress = _approvedErc721s.at(0);
+                _clearTokenApproval(TokenType.ERC721, ApprovalType.ERC721_APPROVE, tokenAddress);
+                _approvedErc721s.remove(tokenAddress);
+            }
+        }
+        length = _approvedForAll.length();
+        unchecked {
+            for (uint256 i = 0; i < length; ++i) {
+                address tokenAddress = _approvedForAll.at(0);
+                _clearTokenApproval(TokenType.ERC1155, ApprovalType.SET_APPROVAL_FOR_ALL, tokenAddress);
+                _approvedForAll.remove(tokenAddress);
+            }
+        }
+    }
+
+    function _clearTokenApproval(TokenType tokenType, ApprovalType approvalType, address tokenAddress) internal {}
+
+    function updateApprovedOperator(
+        EnumerableSet.AddressSet storage toUpdate,
+        EnumerableMap.AddressToUintMap storage toAddOrRemove,
+        address target,
+        address operator,
+        uint256 value
+    ) internal {
+        if (value == 0) {
+            _removeAndUpdateTracked(toUpdate, toAddOrRemove, operator);
+        } else {
+            toUpdate.add(target);
+            toAddOrRemove.set(operator, value);
+        }
+    }
+
+    function _removeAndUpdateTracked(
+        EnumerableSet.AddressSet storage toUpdate,
+        EnumerableMap.AddressToUintMap storage toRemove,
+        address target
+    ) internal {
+        bool removed = toRemove.remove(target);
+        if (removed && toRemove.length() == 0) {
+            toUpdate.remove(target);
+        }
+    }
+
+    function _getApprovedAddressFromApproveCalldata(bytes calldata callData) internal pure returns (address addr) {
         ///@solidity memory-safe-assembly
         assembly {
-            let value := calldataload(add(callData.offset, 0x44))
+            addr := calldataload(add(callData.offset, 0x24))
+        }
+    }
+
+    function _getApprovedValueFromApproveCalldata(bytes calldata callData) internal pure returns (uint256 value) {
+        ///@solidity memory-safe-assembly
+        assembly {
+            value := calldataload(add(callData.offset, 0x44))
         }
     }
 
@@ -90,9 +222,5 @@ contract Account is Clone, Executable, TokenOwnable {
 
     function _getTokenId() internal pure override returns (uint256) {
         return _getArgUint256(32);
-    }
-
-    function _onlyOwner() internal view override (TokenOwnable, Executable) {
-        TokenOwnable._onlyOwner();
     }
 }

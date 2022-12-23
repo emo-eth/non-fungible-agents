@@ -4,7 +4,7 @@ pragma solidity ^0.8.17;
 import {IERC173} from "./IERC173.sol";
 import {Bundle} from "./lib/Structs.sol";
 
-abstract contract Executable is IERC173 {
+contract Executable {
     /**
      * @notice Admin function that allows the owner to execute any transaction on behalf of the contract.
      *
@@ -14,12 +14,16 @@ abstract contract Executable is IERC173 {
      * @return The bytes returned by the transaction.
      */
 
-    function execute(address target, uint256 value, bytes calldata data) public returns (bytes memory) {
-        _onlyOwner();
+    function execute(address target, uint256 value, bytes calldata data)
+        public
+        payable
+        virtual
+        returns (bytes memory)
+    {
         return _execute(target, value, data);
     }
 
-    function _execute(address target, uint256 value, bytes calldata data) internal returns (bytes memory) {
+    function _execute(address target, uint256 value, bytes calldata data) internal virtual returns (bytes memory) {
         // call target, sending value ether and data as calldata
         (bool success, bytes memory returned) = target.call{value: value}(data);
         if (success) {
@@ -34,8 +38,7 @@ abstract contract Executable is IERC173 {
         }
     }
 
-    function executeBundle(Bundle[] calldata bundles) public returns (bytes[] memory) {
-        _onlyOwner();
+    function executeBundle(Bundle[] calldata bundles) public payable virtual returns (bytes[] memory) {
         // allocate memory for the results
         bytes[] memory results = new bytes[](bundles.length);
         // execute each bundle
@@ -49,9 +52,17 @@ abstract contract Executable is IERC173 {
         return results;
     }
 
-    function executeOptimized(address target, uint256 value, bytes calldata data) public {
-        _onlyOwner();
+    function executeOptimized(address target, uint256 value, bytes calldata data) public payable virtual {
         _executeOptimized(target, value, data);
+    }
+
+    function executeBundleOptimized(Bundle[] calldata bundles) public payable virtual {
+        unchecked {
+            for (uint256 i = 0; i < bundles.length; ++i) {
+                Bundle calldata bundle = bundles[i];
+                _executeOptimized(bundle.target, bundle.value, bundle.data);
+            }
+        }
     }
 
     function _executeOptimized(address target, uint256 value, bytes calldata data) internal {
@@ -71,16 +82,4 @@ abstract contract Executable is IERC173 {
             }
         }
     }
-
-    function executeBundleOptimized(Bundle[] calldata bundles) public {
-        _onlyOwner();
-        unchecked {
-            for (uint256 i = 0; i < bundles.length; ++i) {
-                Bundle calldata bundle = bundles[i];
-                _executeOptimized(bundle.target, bundle.value, bundle.data);
-            }
-        }
-    }
-
-    function _onlyOwner() internal view virtual;
 }
