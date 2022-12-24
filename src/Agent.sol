@@ -20,7 +20,7 @@ import {
 import {TrackedApproval, createTrackedApproval} from "./lib/types/TrackedApproval.sol";
 import {Bundle} from "./lib/Structs.sol";
 
-contract Account is Clone, Executable, TokenOwnable {
+contract Agent is Clone, Executable, TokenOwnable {
     // using EnumerableMap for EnumerableMap.UintToUintMap;
     using EnumerableSet for EnumerableSet.UintSet;
     using EnumerableSet for EnumerableSet.AddressSet;
