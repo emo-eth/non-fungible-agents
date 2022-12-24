@@ -32,13 +32,22 @@ contract ERC721Agent is ERC721A {
         _mint(to, numTokens);
     }
 
+    /**
+     * @notice Deploy an Agent contract for a token to a deterministic address, using a zero salt. Anyone may call
+     *         this function once the token has been minted, but only the token owner may execute actions on behalf of
+     *         the Agent contract.
+     */
     function deployAgent(uint256 tokenId) public virtual returns (address) {
+        return _deployAgent(tokenId, bytes32(0));
+    }
+
+    function _deployAgent(uint256 tokenId, bytes32 salt) internal virtual returns (address) {
         ownerOf(tokenId); // revert if tokenId does not exist for simpler _beforeTokenTransfer logic
         if (hasAgentBeenDeployed(tokenId)) {
             revert AgentAlreadyDeployed(tokenId, tokenIdToAgentAddress[tokenId]);
         }
         address agentAddress =
-            Create2ClonesWithImmutableArgs.clone(AGENT_IMPLEMENTATION, abi.encode(address(this), tokenId), bytes32(0));
+            Create2ClonesWithImmutableArgs.clone(AGENT_IMPLEMENTATION, abi.encode(address(this), tokenId), salt);
         tokenIdToAgentAddress[tokenId] = agentAddress;
         return agentAddress;
     }
@@ -51,6 +60,12 @@ contract ERC721Agent is ERC721A {
         revert("I still need to implement this function");
     }
 
+    /**
+     * @notice To prevent malicious owners front-running the sale of their tokens (and thus associated Agents), eg,
+     *         to prevent a malicious seller from withdrawing funds from their Agent contract as a sale is in-flight,
+     *         we require that the Agent contract be frozen before the token can be transferred to a new owner if the current
+     *         owner is not the operator.
+     */
     function _beforeTokenTransfers(address from, address, uint256 startTokenId, uint256 quantity)
         internal
         virtual

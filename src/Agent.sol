@@ -29,19 +29,28 @@ contract Agent is Clone, Executable, TokenOwnable {
 
     bool public isFrozen;
 
+    ///@dev Track all approvals so we can delete them when the Agent is frozen, so funds may not be withdrawn by the
+    ///     owner if the underlying token is listed for sale.
     EnumerableSet.AddressSet _approvedErc20s;
     EnumerableSet.AddressSet _approvedErc721s;
     EnumerableSet.AddressSet _approvedForAll;
-
     mapping(address => EnumerableMap.AddressToUintMap) _approvalsForAll;
     mapping(address => EnumerableMap.AddressToUintMap) _erc20ApprovalsMap;
     mapping(address => EnumerableMap.UintToAddressMap) _erc721ApprovalsMap;
 
-    function freeze() public {
+    function setFrozen(bool frozen) public {
         _onlyOwner();
-        isFrozen = true;
+        isFrozen = frozen;
     }
 
+    /**
+     * @notice Execute a single transaction on behalf of this account if it is not frozen, not an approval, and the
+     *         sender is the owner of the associated token.
+     * @param target The address of the contract to call.
+     * @param value The amount of Ether to send with the call.
+     * @param callData The data to send with the call.
+     * @return The bytes returned by the call.
+     */
     function execute(address target, uint256 value, bytes calldata callData)
         public
         payable
@@ -54,6 +63,12 @@ contract Agent is Clone, Executable, TokenOwnable {
         return super.execute(target, value, callData);
     }
 
+    /**
+     * @notice Execute a bundle of transactions on behalf of this account if it is not frozen, they are not approvals, and
+     *         the sender is the owner of the associated token. Returns an array of the bytes returned by each call.
+     * @param bundles The bundles of transactions to execute.
+     * @return The bytes returned by each call.
+     */
     function executeBundle(Bundle[] calldata bundles) public payable override returns (bytes[] memory) {
         _onlyOwner();
         _notFrozen();
@@ -65,6 +80,13 @@ contract Agent is Clone, Executable, TokenOwnable {
         return super.executeBundle(bundles);
     }
 
+    /**
+     * @notice Execute a single transaction on behalf of this account if it is not frozen, not an approval, and the
+     *         sender is the owner of the associated token. Do not return the result.
+     * @param target The address of the contract to call.
+     * @param value The amount of Ether to send with the call.
+     * @param callData The data to send with the call.
+     */
     function executeOptimized(address target, uint256 value, bytes calldata callData) public payable override {
         _onlyOwner();
         _notFrozen();
@@ -72,6 +94,11 @@ contract Agent is Clone, Executable, TokenOwnable {
         return super.executeOptimized(target, value, callData);
     }
 
+    /**
+     * @notice Execute a bundle of transactions on behalf of this account if it is not frozen, they are not approvals, and
+     *         the sender is the owner of the associated token. Do not return the result.
+     * @param bundles The bundles of transactions to execute.
+     */
     function executeBundleOptimized(Bundle[] calldata bundles) public payable override {
         _onlyOwner();
         _notFrozen();
@@ -83,7 +110,10 @@ contract Agent is Clone, Executable, TokenOwnable {
         return super.executeBundleOptimized(bundles);
     }
 
-    function setApprovalForAll(address tokenAddress, address approvedAddress, bool approved) public returns (bool) {
+    /**
+     * @notice Set the approval status of an operator for all tokens of an ERC721 or ERC1155 contract.
+     */
+    function setApprovalForAll(address tokenAddress, address approvedAddress, bool approved) public {
         _onlyOwner();
         _notFrozen();
         _updateApprovedOperator(
@@ -92,6 +122,9 @@ contract Agent is Clone, Executable, TokenOwnable {
         IERC721(tokenAddress).setApprovalForAll(approvedAddress, approved);
     }
 
+    /**
+     * @notice Approve an operator to transfer a specific ERC721 token on behalf of this account.
+     */
     function approveErc721(address tokenAddress, address approvedAddress, uint256 tokenId) public {
         _onlyOwner();
         _notFrozen();
@@ -103,6 +136,9 @@ contract Agent is Clone, Executable, TokenOwnable {
         IERC721(tokenAddress).approve(approvedAddress, tokenId);
     }
 
+    /**
+     * @notice Approve an operator to transfer an amount of an ERC20 token on behalf of this account.
+     */
     function approveErc20(address tokenAddress, address approvedAddress, uint256 amount) public {
         _onlyOwner();
         _notFrozen();
