@@ -17,6 +17,8 @@ contract ERC721Agent is ERC721A {
     error AgentAlreadyDeployed(uint256 tokenId, address agentAddress);
     error AgentMustBeFrozenBeforeApprovedTransfer();
 
+    ///@dev we use the implementation contract to create lightweight Clone proxies for each Agent, which are much
+    /// cheaper to deploy
     address immutable AGENT_IMPLEMENTATION;
 
     mapping(uint256 => address) public tokenIdToAgentAddress;
@@ -38,14 +40,16 @@ contract ERC721Agent is ERC721A {
      *         the Agent contract.
      */
     function deployAgent(uint256 tokenId) public virtual returns (address) {
+        ownerOf(tokenId); // revert if tokenId does not exist, for simpler _beforeTokenTransfer logic
         return _deployAgent(tokenId, bytes32(0));
     }
 
     function _deployAgent(uint256 tokenId, bytes32 salt) internal virtual returns (address) {
-        ownerOf(tokenId); // revert if tokenId does not exist for simpler _beforeTokenTransfer logic
         if (hasAgentBeenDeployed(tokenId)) {
             revert AgentAlreadyDeployed(tokenId, tokenIdToAgentAddress[tokenId]);
         }
+        // create2 a lightweight clone of the Agent contract that will pass this contract's address and associated
+        // tokenId as gas-efficient immutable variables in calldata.
         address agentAddress =
             Create2ClonesWithImmutableArgs.clone(AGENT_IMPLEMENTATION, abi.encode(address(this), tokenId), salt);
         tokenIdToAgentAddress[tokenId] = agentAddress;
@@ -62,8 +66,8 @@ contract ERC721Agent is ERC721A {
 
     /**
      * @notice To prevent malicious owners front-running the sale of their tokens (and thus associated Agents), eg,
-     *         to prevent a malicious seller from withdrawing funds from their Agent contract as a sale is in-flight,
-     *         we require that the Agent contract be frozen before the token can be transferred to a new owner if the current
+     *         withdrawing funds from their Agent contract as a sale is in-flight, we require that the Agent contract
+     *         be frozen before the token can be transferred to a new owner if the current
      *         owner is not the operator.
      */
     function _beforeTokenTransfers(address from, address, uint256 startTokenId, uint256 quantity)

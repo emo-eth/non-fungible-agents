@@ -43,20 +43,6 @@ contract ERC721_007 is ERC721Agent {
      */
     function deployAgent(uint256 tokenId, bytes32 salt) public virtual returns (address) {
         _onlyTokenOwner(tokenId);
-        if (hasAgentBeenDeployed(tokenId)) {
-            revert AgentAlreadyDeployed(tokenId, tokenIdToAgentAddress[tokenId]);
-        }
-        // salt should depend on both tokenId and salt to avoid collision
-        bytes32 compoundSalt;
-        ///@solidity memory-safe-assembly
-        assembly {
-            mstore(0, tokenId)
-            mstore(0x20, salt)
-            compoundSalt := keccak256(0, 0x40)
-        }
-        address agentAddress =
-            Create2ClonesWithImmutableArgs.clone(AGENT_IMPLEMENTATION, abi.encode(address(this), tokenId), compoundSalt);
-        tokenIdToAgentAddress[tokenId] = agentAddress;
-        return agentAddress;
+        _deployAgent(tokenId, salt);
     }
 }
